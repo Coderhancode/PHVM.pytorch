@@ -148,7 +148,6 @@ class PHVM(nn.Module):
         self.tgt_vocab_size = tgt_vocab_size
         self.cate_vocab_size = cate_vocab_size
         self.type_vocab_size = type_vocab_size
-        self.make_embedding(key_wordvec, val_wordvec, tgt_wordvec)
         
         self.sent_KL_loss = torch.tensor(0, dtype=torch.float, device=self.device)
         self.group_decode_loss = torch.tensor(0, dtype=torch.float, device=self.device)
@@ -206,17 +205,21 @@ class PHVM(nn.Module):
         self.attention = Attention(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_decoder_output_dim, self.config.attention_hidden_size)
         
         for name, param in self.named_parameters():
-            if name.startswith("weight"):
+            if "weight" in name:
                 nn.init.xavier_normal_(param)
             else:
                 nn.init.zeros_(param)
+        
+        # 需要放到模型初始化后面，防止nn.Embedding的参数被置为0
+        self.make_embedding(key_wordvec, val_wordvec, tgt_wordvec)
     
     def make_embedding(self, key_wordvec, val_wordvec, tgt_wordvec):
+        
         if tgt_wordvec is None:
             self.word_embedding = nn.Embedding(self.tgt_vocab_size, self.config.PHVM_word_dim)
         else:
             self.word_embedding = nn.Embedding.from_pretrained(torch.FloatTensor(tgt_wordvec))
-        
+            
         if key_wordvec is None:
             self.key_embedding = nn.Embedding(self.key_vocab_size, self.config.PHVM_key_dim)
         else:
@@ -228,6 +231,14 @@ class PHVM(nn.Module):
             self.val_embedding = nn.Embedding.from_pretrained(torch.FloatTensor(val_wordvec))
         
         self.cate_embedding = nn.Embedding(self.cate_vocab_size, self.config.PHVM_cate_dim)
+        '''
+        input = torch.tensor([[1,2,4,5],[4,3,2,9]])
+        text = self.word_embedding(input)
+        print(text.max())
+        input = torch.tensor([[1,2,4,5],[4,3,2,9]])
+        text = self.key_embedding(input)
+        print(text.max())
+        '''
     
     def sample_gaussian(self, shape, mu, logvar):
         x = torch.normal(0, 1, size=shape).cuda()
@@ -347,7 +358,7 @@ class PHVM(nn.Module):
         cate_embed = self.cate_embedding(cate_input)    # shape[batch_size, cate_cnt, dim]
         #input = torch.tensor([[1,2,4,5],[4,3,2,9]], dtype=torch.long, device=self.device)
         text_embed = self.word_embedding(text)  # shape[batch_size, text_cnt, dim]
-        print(text_embed.max())
+        #print(text_embed.max())
         
         return key_val_embed, cate_embed, text_embed
     
@@ -355,6 +366,7 @@ class PHVM(nn.Module):
         key_val_embed = key_val_embed.permute(1, 0, 2)  # shape[key_cnt, batch_size, dim]
         #print(key_val_embed.max())
         key_val_encode_output, (key_val_encode_state, _) = self.key_val_encode_rnn(key_val_embed)   # shape[key_cnt, batch_size, dim], shape[D*num_layers, batch_size, dim]
+        #print(key_val_encode_output.max())
         key_val_encode_embed = torch.cat((key_val_encode_state[-1, :, :], key_val_encode_state[-2, :, :]), 1)  # 需调试判断是否用index0和1, shape[batch_size, dim]
         
         return key_val_encode_output.permute(1, 0, 2), key_val_encode_embed

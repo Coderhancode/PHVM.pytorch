@@ -62,7 +62,7 @@ def infer(model, dataset):
             
             sent_idx, stop = model(key_input.cuda(), val_input.cuda(), input_lens.cuda(), target_input.cuda(), target_output.cuda(), output_lens.cuda(), groups.cuda(), glens.cuda(), group_cnt.cuda(), text.cuda(), cate_input.cuda())
             print(sent_idx, stop)
-            output = agg_group(stop.cpu().numpy(), sent_idx.cpu().numpy(), 0, 1)
+            output = agg_group(stop.cpu().numpy().astype(int), sent_idx.cpu().numpy().astype(int), 0, 1)
             _output = []
             for inst_id, inst in enumerate(output):
                 sents = []
@@ -112,19 +112,23 @@ def _train(model_name, model, optimizer, lr_scheduler, train_loader, init):
             try:
                 key_input, val_input, input_lens, target_input, target_output, output_lens, groups, glens, group_cnt, target_type, target_type_lens, text, slens, cate_input = next(train_iter)
                 #print(cate_input)
-                loss = model(key_input.cuda(), val_input.cuda(), input_lens.cuda(), target_input.cuda(), target_output.cuda(), output_lens.cuda(), groups.cuda(), glens.cuda(), group_cnt.cuda(), text.cuda(), cate_input.cuda())
-                if i % 100 == 0:
+                loss = model(key_input.cuda(), val_input.cuda(), input_lens.cuda(), target_input.cuda(), \
+                            target_output.cuda(), output_lens.cuda(), groups.cuda(), glens.cuda(), \
+                            group_cnt.cuda(), text.cuda(), cate_input.cuda())
+                if i != 0 and i % 100 == 0:
                     end_time = time.time()
-                    print("loss:", loss.item(), "epoch:", epoch,  "iter_num:", i, "/", len(train_loader), "cost_time_100_iters:", end_time-start_time)
-                    sys.stdout.flush()
+                    print("loss:", loss.item(), "epoch:", epoch, \
+                    "iter_num:", i, "/", len(train_loader), \
+                    "lr:", optimizer.state_dict()['param_groups'][0]['lr'], \
+                    "cost_time_100_iters:", end_time-start_time)
+                    #sys.stdout.flush()
                     start_time = time.time()
                 model.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5)
                 optimizer.step()
                 
-                #model.clear_zero()
-                #torch.cuda.empty_cache()
+                torch.cuda.empty_cache()
                 i += 1
             except StopIteration:
                 train_iter = iter(train_loader)
@@ -179,7 +183,7 @@ def get_args():
 	parser.add_argument("--train", type="bool", default=True)
 	parser.add_argument("--restore", type="bool", default=False)
 	parser.add_argument("--model_name", type=str, default="PHVM")
-	parser.add_argument("--checkpoint", type=str, default="")
+	parser.add_argument("--checkpoint", type=str, default="./result/checkpoint/PHVM/20.pth")
 	args = parser.parse_args(sys.argv[1:])
 	return args
 
@@ -205,6 +209,7 @@ def main():
 			model.cuda()
 		
 		texts = infer(model, dataset)
+        for 
 		dump(texts, config.result_dir + "/{}.json".format(args.model_name))
 		utils.print_out("finish file test")
 
