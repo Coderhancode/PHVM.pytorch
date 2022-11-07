@@ -63,6 +63,7 @@ def infer(model, dataset):
             sent_idx, stop = model(key_input.cuda(), val_input.cuda(), input_lens.cuda(), target_input.cuda(), target_output.cuda(), output_lens.cuda(), groups.cuda(), glens.cuda(), group_cnt.cuda(), text.cuda(), cate_input.cuda())
             print(sent_idx, stop)
             output = agg_group(stop.cpu().numpy().astype(int), sent_idx.cpu().numpy().astype(int), 0, 1)
+            #output = agg_group(np.array([sent_idx.size(0)]), sent_idx.cpu().numpy().astype(int), 0, 1)
             _output = []
             for inst_id, inst in enumerate(output):
                 sents = []
@@ -121,7 +122,7 @@ def _train(model_name, model, optimizer, lr_scheduler, train_loader, init):
                     "iter_num:", i, "/", len(train_loader), \
                     "lr:", optimizer.state_dict()['param_groups'][0]['lr'], \
                     "cost_time_100_iters:", end_time-start_time)
-                    #sys.stdout.flush()
+                    sys.stdout.flush()
                     start_time = time.time()
                 model.zero_grad()
                 loss.backward()
@@ -209,7 +210,6 @@ def main():
 			model.cuda()
 		
 		texts = infer(model, dataset)
-        for 
 		dump(texts, config.result_dir + "/{}.json".format(args.model_name))
 		utils.print_out("finish file test")
 

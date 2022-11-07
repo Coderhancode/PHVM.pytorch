@@ -28,6 +28,7 @@ class PHVMConfig:
         self.PHVM_use_type_info = False
         self.PHVM_type_dim = 30
         self.PHVM_rnn_bidirectional = True
+        self.PHVM_rnn_bidirectional_num = 2
 
         # encoder
         self.PHVM_encoder_input_dim = self.PHVM_key_dim+self.PHVM_val_dim
@@ -57,7 +58,7 @@ class PHVMConfig:
         self.PHVM_sent_latent_dim = 200
 
         # latent_decoder
-        self.PHVM_latent_decoder_input_dim = self.PHVM_decoder_output_dim+self.PHVM_sent_latent_dim
+        self.PHVM_latent_decoder_input_dim = self.PHVM_decoder_output_dim*2+self.PHVM_sent_latent_dim
         self.PHVM_latent_decoder_output_dim = 300
         self.PHVM_latent_decoder_num_layer = 1
 
@@ -93,9 +94,9 @@ class PHVMConfig:
 class Attention(nn.Module):
     def __init__(self, input_size, hidden_size):
         super(Attention, self).__init__()
-        self.hidden_size = hidden_size
-        self.attn = nn.Linear(input_size, hidden_size)
-        self.v = nn.Parameter(torch.rand(hidden_size))
+        self.hidden_size = hidden_size*2
+        self.attn = nn.Linear(input_size, self.hidden_size)
+        self.v = nn.Parameter(torch.rand(self.hidden_size))
         stdv = 1. / math.sqrt(self.v.size(0))
         self.v.data.uniform_(-stdv, stdv)
 
@@ -150,21 +151,26 @@ class PHVM(nn.Module):
         self.type_vocab_size = type_vocab_size
         
         self.sent_KL_loss = torch.tensor(0, dtype=torch.float, device=self.device)
-        self.group_decode_loss = torch.tensor(0, dtype=torch.float, device=self.device)
+        self.group_dec_loss = torch.tensor(0, dtype=torch.float, device=self.device)
         self.bow_loss = torch.tensor(0, dtype=torch.float, device=self.device)
+        self.sent_dec_loss = torch.tensor(0, dtype=torch.float, device=self.device)
         
         self.key_val_encode_rnn = nn.LSTM(self.config.PHVM_encoder_input_dim, 
                                      self.config.PHVM_encoder_output_dim, 
                                      bidirectional=self.config.PHVM_rnn_bidirectional)
         self.group_decoder_rnn = nn.LSTM(self.config.PHVM_group_decoder_input_dim, 
-                                     self.config.PHVM_group_decoder_output_dim)
+                                     self.config.PHVM_group_decoder_output_dim, 
+                                     bidirectional=self.config.PHVM_rnn_bidirectional)
         self.group_encoder_rnn = nn.LSTM(self.config.PHVM_group_encoder_input_dim, 
-                                     self.config.PHVM_group_encoder_output_dim)
+                                     self.config.PHVM_group_encoder_output_dim, 
+                                     bidirectional=self.config.PHVM_rnn_bidirectional)
         self.latent_decoder_rnn = nn.LSTM(self.config.PHVM_latent_decoder_input_dim, 
-                                     self.config.PHVM_latent_decoder_output_dim)
+                                     self.config.PHVM_latent_decoder_output_dim, 
+                                     bidirectional=self.config.PHVM_rnn_bidirectional)
         self.decoder_rnn = nn.LSTM(self.config.PHVM_decoder_input_dim, 
                                      self.config.PHVM_decoder_output_dim, 
-                                     self.config.PHVM_decoder_num_layer)
+                                     self.config.PHVM_decoder_num_layer, 
+                                     bidirectional=self.config.PHVM_rnn_bidirectional)
         self.text_encode_rnn = nn.LSTM(self.config.PHVM_text_post_encoder_input_dim,
                                      self.config.PHVM_text_post_encoder_output_dim,
                                      bidirectional=self.config.PHVM_rnn_bidirectional)
@@ -181,28 +187,28 @@ class PHVM(nn.Module):
         self.group_init_h0_fc = nn.Linear(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_cate_dim+self.config.PHVM_plan_latent_dim, self.config.PHVM_group_decoder_output_dim)
         self.group_init_c0_fc = nn.Linear(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_cate_dim+self.config.PHVM_plan_latent_dim, self.config.PHVM_group_decoder_output_dim)
 
-        self.stop_clf = nn.Linear(self.config.PHVM_group_decoder_output_dim, 1)
+        self.stop_clf = nn.Linear(self.config.PHVM_group_decoder_output_dim*2, 1)
         
-        self.group_fc_1 = nn.Linear(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_group_decoder_output_dim, self.config.PHVM_encoder_output_dim)
+        self.group_fc_1 = nn.Linear(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_group_decoder_output_dim*2, self.config.PHVM_encoder_output_dim)
         self.group_fc_2 = nn.Linear(self.config.PHVM_encoder_output_dim, 2)
         
-        self.prior_sent_fc_layer = nn.Linear(self.config.PHVM_latent_decoder_output_dim+self.config.PHVM_encoder_output_dim*2, self.config.PHVM_sent_latent_dim*2)
-        self.post_sent_fc_layer = nn.Linear(self.config.PHVM_latent_decoder_output_dim+self.config.PHVM_encoder_output_dim*2+self.config.PHVM_sent_post_encoder_output_dim*2, self.config.PHVM_sent_latent_dim*2)
+        self.prior_sent_fc_layer = nn.Linear(self.config.PHVM_latent_decoder_output_dim*2+self.config.PHVM_encoder_output_dim*2, self.config.PHVM_sent_latent_dim*2)
+        self.post_sent_fc_layer = nn.Linear(self.config.PHVM_latent_decoder_output_dim*2+self.config.PHVM_encoder_output_dim*2+self.config.PHVM_sent_post_encoder_output_dim*2, self.config.PHVM_sent_latent_dim*2)
         
-        self.plan_init_h_state_fc = nn.Linear(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_cate_dim+self.config.PHVM_plan_latent_dim+self.config.PHVM_group_encoder_output_dim, self.config.PHVM_latent_decoder_output_dim)
-        self.plan_init_c_state_fc = nn.Linear(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_cate_dim+self.config.PHVM_plan_latent_dim+self.config.PHVM_group_encoder_output_dim, self.config.PHVM_latent_decoder_output_dim)
+        self.plan_init_h_state_fc = nn.Linear(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_cate_dim+self.config.PHVM_plan_latent_dim+self.config.PHVM_group_encoder_output_dim*2, self.config.PHVM_latent_decoder_output_dim)
+        self.plan_init_c_state_fc = nn.Linear(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_cate_dim+self.config.PHVM_plan_latent_dim+self.config.PHVM_group_encoder_output_dim*2, self.config.PHVM_latent_decoder_output_dim)
         
-        self.prior_fc_layer = nn.Linear(self.config.PHVM_latent_decoder_output_dim+self.config.PHVM_encoder_output_dim, self.config.PHVM_sent_latent_dim * 2)
+        self.prior_fc_layer = nn.Linear(self.config.PHVM_latent_decoder_output_dim*2+self.config.PHVM_encoder_output_dim, self.config.PHVM_sent_latent_dim * 2)
         
-        self.sent_dec_h_state_fc = nn.Linear(self.config.PHVM_latent_decoder_output_dim+self.config.PHVM_encoder_output_dim*2+self.config.PHVM_sent_latent_dim, self.config.PHVM_decoder_output_dim)
-        self.sent_dec_c_state_fc = nn.Linear(self.config.PHVM_latent_decoder_output_dim+self.config.PHVM_encoder_output_dim*2+self.config.PHVM_sent_latent_dim, self.config.PHVM_decoder_output_dim)
+        self.sent_dec_h_state_fc = nn.Linear(self.config.PHVM_latent_decoder_output_dim*2+self.config.PHVM_encoder_output_dim*2+self.config.PHVM_sent_latent_dim, self.config.PHVM_decoder_output_dim)
+        self.sent_dec_c_state_fc = nn.Linear(self.config.PHVM_latent_decoder_output_dim*2+self.config.PHVM_encoder_output_dim*2+self.config.PHVM_sent_latent_dim, self.config.PHVM_decoder_output_dim)
         
-        self.bow_fc_1 = nn.Linear(self.config.PHVM_latent_decoder_output_dim+self.config.PHVM_encoder_output_dim*2+self.config.PHVM_sent_latent_dim, self.config.PHVM_bow_hidden_dim)
+        self.bow_fc_1 = nn.Linear(self.config.PHVM_latent_decoder_output_dim*2+self.config.PHVM_encoder_output_dim*2+self.config.PHVM_sent_latent_dim, self.config.PHVM_bow_hidden_dim)
         self.bow_fc_2 = nn.Linear(self.config.PHVM_bow_hidden_dim, self.tgt_vocab_size)
         
-        self.word_attention_fc = nn.Linear(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_decoder_output_dim, self.tgt_vocab_size)
+        self.word_attention_fc = nn.Linear(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_decoder_output_dim*2, self.tgt_vocab_size)
         
-        self.attention = Attention(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_decoder_output_dim, self.config.attention_hidden_size)
+        self.attention = Attention(self.config.PHVM_encoder_output_dim*2+self.config.PHVM_decoder_output_dim*2, self.config.attention_hidden_size)
         
         for name, param in self.named_parameters():
             if "weight" in name:
@@ -367,14 +373,14 @@ class PHVM(nn.Module):
         #print(key_val_embed.max())
         key_val_encode_output, (key_val_encode_state, _) = self.key_val_encode_rnn(key_val_embed)   # shape[key_cnt, batch_size, dim], shape[D*num_layers, batch_size, dim]
         #print(key_val_encode_output.max())
-        key_val_encode_embed = torch.cat((key_val_encode_state[-1, :, :], key_val_encode_state[-2, :, :]), 1)  # 需调试判断是否用index0和1, shape[batch_size, dim]
+        key_val_encode_embed = torch.cat((key_val_encode_state[-2, :, :], key_val_encode_state[-1, :, :]), 1)  # 需调试判断是否用index0和1, shape[batch_size, dim]
         
         return key_val_encode_output.permute(1, 0, 2), key_val_encode_embed
     
     def text_encode(self, text_embed):
         text_embed = text_embed.permute(1, 0, 2)    # shape[text_cnt, batch_size, dim]
         text_encode_output, (text_encode_h_state, _) = self.text_encode_rnn(text_embed) # shape[text_cnt, batch_size, dim], shape[D*num_layers, batch_size, dim]
-        text_encode_embed = torch.cat((text_encode_h_state[-1, :, :], text_encode_h_state[-2, :, :]), 1)  # 需调试判断是否用index0和1, shape[batch_size, dim]
+        text_encode_embed = torch.cat((text_encode_h_state[-2, :, :], text_encode_h_state[-1, :, :]), 1)  # 需调试判断是否用index0和1, shape[batch_size, dim]
         
         return text_encode_output, text_encode_embed
     
@@ -415,41 +421,46 @@ class PHVM(nn.Module):
     def sent_word_decode_train(self, dec_input, key_val_encode_output, input_lens, output_lens, groups, glens, group_cnt, target_input, target_output):
         
         i = 0
-        group_h_state = self.group_init_h0_fc(dec_input).unsqueeze(0)   # shape[1, batch_size, dim]
-        group_c_state = self.group_init_c0_fc(dec_input).unsqueeze(0)   # shape[1, batch_size, dim]
-        gbow = torch.zeros((self.batch_size, self.config.PHVM_encoder_output_dim*2), dtype=torch.float32, device=self.device)
         stop_sign = []
+        
+        # planning过程初始化
+        tile_dec_input = torch.tile(dec_input.unsqueeze(0), (self.config.PHVM_rnn_bidirectional_num, 1, 1))
+        group_h_state = self.group_init_h0_fc(tile_dec_input)   # shape[1, batch_size, dim]
+        group_c_state = self.group_init_c0_fc(tile_dec_input)   # shape[1, batch_size, dim]
+        gbow = torch.zeros((self.batch_size, self.config.PHVM_encoder_output_dim*2), dtype=torch.float32, device=self.device)
         
         # 利用label信息得到group编码
         group_bow, group_mean_bow, group_embed = self.group_encode(key_val_encode_output, groups, glens, group_cnt)
         
         # 初始化
-        sent_state = torch.zeros((self.batch_size, self.config.PHVM_decoder_output_dim), dtype=torch.float32, device=self.device)
+        sent_state = torch.zeros((self.batch_size, self.config.PHVM_decoder_output_dim*2), dtype=torch.float32, device=self.device)
         sent_z = torch.zeros((self.batch_size, self.config.PHVM_sent_latent_dim), dtype=torch.float32, device=self.device)
         input_group_concat = torch.cat((dec_input, group_embed), 1)
-        plan_h_state = self.plan_init_h_state_fc(input_group_concat).unsqueeze(0)
-        plan_c_state = self.plan_init_c_state_fc(input_group_concat).unsqueeze(0)
+        tile_input_group_concat = torch.tile(input_group_concat.unsqueeze(0), (self.config.PHVM_rnn_bidirectional_num, 1, 1))
+        plan_h_state = self.plan_init_h_state_fc(tile_input_group_concat)   # shape[1, batch_size, dim]
+        plan_c_state = self.plan_init_c_state_fc(tile_input_group_concat)   # shape[1, batch_size, dim]
+        # latent_decoder_rnn是单向时
+        #plan_h_state = self.plan_init_h_state_fc(input_group_concat).unsqueeze(0)
+        #plan_c_state = self.plan_init_c_state_fc(input_group_concat).unsqueeze(0)
         
-        sent_logit = torch.zeros((target_input.size(0), target_input.size(1), target_input.size(2), self.tgt_vocab_size), device=self.device)
+        #sent_logit = torch.zeros((target_input.size(0), target_input.size(1), target_input.size(2), self.tgt_vocab_size), device=self.device)
+        #print('1111111', sent_logit.requires_grad)
         #print(sent_logit)
+        sent_sign = []
+        input_group_len = target_input.size(1)
         
-        while i < target_input.size(1):
+        while i < input_group_len:
 
             sent_gid = groups[:, i, :]  # shape[batch_size, id_cnt]
             sent_group = group_bow[:, i, :, :]  # shape[batch_size, id_cnt, dim]
-            sent_input = self.word_embedding(target_input[:, i, :]).permute(1, 0, 2)
             
-            sent_encoder_output, (sent_encoder_h_state, _) = self.sent_encode_rnn(sent_input)
-            sent_encode_embed = torch.cat((sent_encoder_h_state[-1, :, :], sent_encoder_h_state[-2, :, :]), 1)
-            
+            # planning过程
             gout, (group_h_state, group_c_state) = self.group_decoder_rnn(gbow.unsqueeze(0), (group_h_state, group_c_state))
-            #group_h_state = group_h_state.data
-            #group_c_state = group_c_state.data
             tile_gout = torch.tile(gout.permute(1, 0, 2), (1, key_val_encode_output.size(1), 1))
             group_fc_input = torch.cat((key_val_encode_output, tile_gout), 2)
             group_logit = self.group_fc_2(torch.tanh(self.group_fc_1(group_fc_input)))   # shape[batch_size, key_value_cnt, 2]
             
-            # 将所有
+            # 计算关于group所包含的key-value对id的真实值与预测值的loss
             #print(sent_gid, glens[:, i])
             group_label = F.one_hot(sent_gid.long(), num_classes=group_logit.size(1))  # shape[batch_size, key_value_cnt, key_value_cnt]
             #print(group_label)
@@ -461,71 +472,95 @@ class PHVM(nn.Module):
             tmp_group_label = group_label[:, 0] - len_tensor
             group_label[:, 0] = tmp_group_label
             #print(masked_group_logit.transpose(1, 2).size(), group_label.squeeze(1).size())
-            self.group_dec_loss = F.cross_entropy(group_logit.transpose(1, 2), group_label.squeeze(1), ignore_index=0)
+            self.group_dec_loss += F.cross_entropy(group_logit.transpose(1, 2), group_label.squeeze(1), ignore_index=0)
             
+            # 计算group stop值
             stop_sign.append(self.stop_clf(gout.squeeze(0)))
             
             gbow = group_mean_bow[:, i, :]
             
-            plan_input = torch.cat((sent_state, sent_z), 1).unsqueeze(0)
-            sent_cond_embed, (plan_h_state, plan_c_state) = self.latent_decoder_rnn(plan_input, (plan_h_state, plan_c_state))
-            #plan_h_state = plan_h_state.data
-            #plan_c_state = plan_c_state.data
-            sent_cond_embed = torch.squeeze(sent_cond_embed, 0)
+            # 句子级先验知识编码
+            sent_input = self.word_embedding(target_input[:, i, :]).permute(1, 0, 2)
+            sent_encoder_output, (sent_encoder_h_state, sent_encoder_c_state) = self.sent_encode_rnn(sent_input)
+            sent_encode_embed = torch.cat((sent_encoder_h_state[-2, :, :], sent_encoder_h_state[-1, :, :]), 1)
             
+            # 句子级编码
+            plan_input = torch.cat((sent_state, sent_z), 1).unsqueeze(0)
+            sent_latent_embed, (plan_h_state, plan_c_state) = self.latent_decoder_rnn(plan_input, (plan_h_state, plan_c_state))
+            #sent_cond_embed = torch.squeeze(sent_latent_embed, 0)
+            sent_cond_embed = torch.cat((plan_h_state[-2, :, :], plan_h_state[-1, :, :]), 1)
+            
+            # 句子级先验随机向量
             sent_prior_input = torch.cat((sent_cond_embed, gbow), 1)
             sent_prior_fc = self.prior_sent_fc_layer(sent_prior_input)
             sent_prior_mu, sent_prior_logvar = torch.split(sent_prior_fc, self.config.PHVM_sent_latent_dim, 1)
             
+            # 句子级后验随机向量
             sent_post_input = torch.cat((sent_cond_embed, gbow, sent_encode_embed), 1)
             sent_post_fc = self.post_sent_fc_layer(sent_post_input)
             sent_post_mu, sent_post_logvar = torch.split(sent_post_fc, self.config.PHVM_sent_latent_dim, 1)
             
-            sent_z = self.sample_gaussian((sent_post_input.size(0), self.config.PHVM_sent_latent_dim), sent_prior_mu, sent_prior_logvar)
-            sent_cond_z_embed = torch.cat((sent_cond_embed, sent_z), 1)
-            
+            # 计算先验分布和后验分布的KL损失
             self.sent_KL_loss += self.KL_divergence(sent_prior_mu, sent_prior_logvar, sent_post_mu, sent_post_logvar)
             
-            sent_dec_state = torch.cat((sent_cond_z_embed, gbow), 1)
-            sent_dec_state = sent_dec_state.unsqueeze(0)
-            tile_sent_dec_state = torch.tile(sent_dec_state, (self.config.PHVM_decoder_num_layer, 1, 1))
+            sent_z = self.sample_gaussian((self.batch_size, self.config.PHVM_sent_latent_dim), sent_prior_mu, sent_prior_logvar)
+            sent_cond_z_embed = torch.cat((sent_cond_embed, sent_z), 1)
+            
+            # word级解码初始化
+            sent_dec_state = torch.cat((sent_cond_z_embed, gbow), 1)    # shape[batch_size, dim]
+            sent_dec_state = sent_dec_state.unsqueeze(0)    # shape[1, batch_size, dim]
+            tile_sent_dec_state = torch.tile(sent_dec_state, (self.config.PHVM_decoder_num_layer*2, 1, 1))    # shape[self.config.PHVM_decoder_num_layer*Direction, batch_size, dim]
             sent_dec_h_state = self.sent_dec_h_state_fc(tile_sent_dec_state)
             sent_dec_c_state = self.sent_dec_c_state_fc(tile_sent_dec_state)
             
             word_idx = torch.zeros((sent_group.size(0)), dtype=torch.int32, device=self.device)
             
+            group_sign = []
             for t in range(target_input.size(2)):
 
                 embedded = self.word_embedding(word_idx).unsqueeze(0)
-                attn_weights  = self.attention(sent_dec_h_state[0], sent_group)
+                sent_dec_h_state_for_attn = torch.cat((sent_dec_h_state[0, :, :], sent_dec_h_state[1, :, :]), 1)    # shape[batch_size, dim]
+                attn_weights  = self.attention(sent_dec_h_state_for_attn, sent_group)
                 context = attn_weights.bmm(sent_group)
                 context = context.transpose(0, 1)
                 rnn_input = torch.cat((embedded, context), 2)
                 output, (sent_dec_h_state, sent_dec_c_state) = self.decoder_rnn(rnn_input, (sent_dec_h_state, sent_dec_c_state))
-                #sent_dec_h_state = sent_dec_h_state.data
-                #sent_dec_c_state = sent_dec_c_state.data
                 output = output.squeeze(0)  # (1,B,N) -> (B,N)
                 context = context.squeeze(0)
                 output = self.word_attention_fc(torch.cat([output, context], 1))  # [32, 512] cat [32, 512] => [32, 512*2] => [32, tgt_vocab_size]
                 
-                sent_logit[:, i, t, :] = output
+                group_sign.append(output.unsqueeze(1))
+                #sent_logit[:, i, t, :] = output
+                #print('2222222', sent_logit.requires_grad)
                 word_idx = target_input[:, i, t]
                 
                 t += 1
             
-            sent_state = sent_dec_h_state[-1]
+            group_sign_logit = torch.cat(group_sign, 1)
+            #sent_sign.append(group_sign_logit.unsqueeze(1))
+            #sent_state = sent_dec_h_state[-1]
+            sent_state = torch.cat((sent_dec_h_state[-2, :, :], sent_dec_h_state[-1, :, :]), 1)
             
-            '''
-            bow_logit = self.bow_fc_2(torch.tanh(self.bow_fc_1(sent_dec_state)))
-            tile_bow_logit = torch.tile(bow_logit, (1, sent_group.size(1), 1))
-            print(tile_bow_logit.size(), target_output[:, i, :].size())
-            self.bow_loss += F.cross_entropy(tile_bow_logit, target_output[:, i, :])
-            '''
+            self.sent_dec_loss += F.cross_entropy(group_sign_logit.permute(0, 2, 1), target_output[:, i, :].long(), ignore_index=0)
+            
+            # 计算bow loss
+            #'''
+            tile_sent_dec_state = torch.tile(sent_dec_state, (target_output.size(2), 1, 1)) # shape[id_cnt_per_group, batch_size, dim]
+            bow_logit = self.bow_fc_2(torch.tanh(self.bow_fc_1(tile_sent_dec_state)))    # shape[id_cnt_per_group, batch_size, tgt_vocab_size]
+            bow_logit = bow_logit.permute(1, 2, 0)  # shape[batch_size, tgt_vocab_size, id_cnt_per_group]
+            #print(tile_bow_logit.size(), target_output[:, i, :].size())
+            self.bow_loss += F.cross_entropy(bow_logit, target_output[:, i, :].long())
+            #'''
             i += 1
         
-        #print(sent_logit)
-        self.sent_dec_loss = F.cross_entropy(sent_logit.permute(0, 3, 1, 2), target_input.long(), ignore_index=0)
+        self.sent_dec_loss /= torch.tensor(input_group_len, dtype=torch.float, device=self.device)
+        #self.bow_loss /= torch.tensor(input_group_len, dtype=torch.float, device=self.device)
         
+        #sent_logit = torch.cat(sent_sign, 1)
+        #print(sent_logit)
+        #self.sent_dec_loss = F.cross_entropy(sent_logit.permute(0, 3, 1, 2), target_input.long(), ignore_index=1)
+        
+        # stop loss
         stop_logit = torch.cat(stop_sign, 1)
         stop_label = group_cnt - (1 - torch.eq(group_cnt, 0).int())
         self.stop_loss = F.cross_entropy(stop_logit, stop_label.long())
@@ -533,19 +568,20 @@ class PHVM(nn.Module):
     def loss_computation(self, plan_KL_weight):
         
         sent_KL_weight = torch.minimum(torch.tensor(1, dtype=torch.float, device=self.device), torch.tensor(self.global_step, dtype=torch.float, device=self.device) / torch.tensor(self.config.PHVM_sent_full_KL_step, dtype=torch.float, device=self.device))
-        #self.bow_loss /= torch.FloatTensor(self.batch_size)
+        #self.bow_loss /= torch.tensor(self.batch_size, dtype=torch.float, device=self.device)
         anneal_sent_KL = sent_KL_weight * self.sent_KL_loss
         anneal_plan_KL = plan_KL_weight * self.plan_KL_loss
         #self.elbo_loss = self.sent_dec_loss + self.group_dec_loss + self.sent_KL_loss + self.plan_KL_loss
         #self.elbo_loss = self.sent_dec_loss + self.group_dec_loss + self.plan_KL_loss
         #self.elbo_loss /= torch.tensor(self.batch_size, dtype=torch.float, device=self.device)
         self.anneal_elbo_loss = self.sent_dec_loss + self.group_dec_loss + anneal_sent_KL + anneal_plan_KL
-        self.anneal_elbo_loss /= torch.tensor(self.batch_size, dtype=torch.float, device=self.device)
+        #self.anneal_elbo_loss /= torch.tensor(self.batch_size, dtype=torch.float, device=self.device)
         self.train_loss = self.anneal_elbo_loss + self.stop_loss + self.bow_loss
         
-        #print(sent_KL_weight.item(), self.sent_KL_loss.item(), plan_KL_weight.item(), self.plan_KL_loss.item(), \
-        #self.group_decode_loss.item(), self.stop_loss.item(), self.anneal_elbo_loss.item(), \
-        #self.sent_dec_loss.item(), self.group_dec_loss.item(), self.train_loss.item())
+        print(sent_KL_weight.item(), '=======' ,self.sent_KL_loss.item(), '=======' ,plan_KL_weight.item(), \
+        '=======', self.plan_KL_loss.item(), '=======' , self.anneal_elbo_loss.item(), '=======' , \
+        self.sent_dec_loss.item(), '=======' ,self.group_dec_loss.item(), '=======' ,anneal_sent_KL.item(), \
+        '=======' ,anneal_plan_KL.item(), '=======' ,self.stop_loss.item(), '=======' ,self.bow_loss.item(), '=======' ,self.train_loss.item())
     
     def clear_zero(self):
         
@@ -576,8 +612,12 @@ class PHVM(nn.Module):
     def group_decode(self, dec_input, gourp_key_value_cnt, key_val_encode_output, input_lens):
     
         i = 0
-        group_h_state = self.group_init_h0_fc(dec_input).unsqueeze(0)
-        group_c_state = self.group_init_c0_fc(dec_input).unsqueeze(0)
+        tile_dec_input = torch.tile(dec_input.unsqueeze(0), (2, 1, 1))
+        group_h_state = self.group_init_h0_fc(tile_dec_input)   # shape[1, batch_size, dim]
+        group_c_state = self.group_init_c0_fc(tile_dec_input)   # shape[1, batch_size, dim]
+        # group_decoder_rnn是单向时
+        #group_h_state = self.group_init_h0_fc(dec_input).unsqueeze(0)
+        #group_c_state = self.group_init_c0_fc(dec_input).unsqueeze(0)
         gbow = torch.zeros((self.batch_size, self.config.PHVM_encoder_output_dim*2), dtype=torch.float32, device=self.device)
         stop = torch.zeros(self.batch_size, dtype=torch.int32, device=self.device)
         groups = torch.zeros((self.batch_size, 1, gourp_key_value_cnt), dtype=torch.int32, device=self.device)
@@ -631,19 +671,24 @@ class PHVM(nn.Module):
         
         group_mean_bow = group_mean_bow.permute(1, 0, 2)
         group_encoder_output, (group_encoder_h_state, group_encoder_c_state) = self.group_encoder_rnn(group_mean_bow)
+        group_encoder_embed = torch.cat((group_encoder_h_state[-2, :, :], group_encoder_h_state[-1, :, :]), 1)
         #print(group_encoder_h_state.size())
         
-        return group_bow, group_mean_bow.permute(1, 0, 2), group_encoder_h_state.squeeze(0)
+        return group_bow, group_mean_bow.permute(1, 0, 2), group_encoder_embed.squeeze(0)
     
     def word_decode(self, groups, glens, dec_input, group_embed, group_bow, group_mean_bow):
         
         i = 0
         input_group_concat = torch.cat((dec_input, group_embed), 1)
-        plan_h_state = self.plan_init_h_state_fc(input_group_concat).unsqueeze(0)
-        plan_c_state = self.plan_init_c_state_fc(input_group_concat).unsqueeze(0)
+        tile_input_group_concat = torch.tile(input_group_concat.unsqueeze(0), (2, 1, 1))
+        plan_h_state = self.plan_init_h_state_fc(tile_input_group_concat)   # shape[1, batch_size, dim]
+        plan_c_state = self.plan_init_c_state_fc(tile_input_group_concat)   # shape[1, batch_size, dim]
+        #plan_h_state = self.plan_init_h_state_fc(input_group_concat).unsqueeze(0)
+        #plan_c_state = self.plan_init_c_state_fc(input_group_concat).unsqueeze(0)
         sent_state = torch.zeros((self.batch_size, self.config.PHVM_decoder_output_dim), dtype=torch.float32, device=self.device)
         sent_z = torch.zeros((self.batch_size, self.config.PHVM_sent_latent_dim), dtype=torch.float32, device=self.device)
-        sent_idx = torch.zeros((self.batch_size, groups.size(1), self.config.PHVM_maximum_iterations), dtype=torch.float32, device=self.device)
+        #sent_idx = torch.zeros((self.batch_size, groups.size(1), self.config.PHVM_maximum_iterations), dtype=torch.float32, device=self.device)
+        group_idx_list = []
         
         while i < groups.size(1):
             gbow = group_mean_bow[:, i, :]
@@ -662,9 +707,10 @@ class PHVM(nn.Module):
             
             sent_dec_state = torch.cat((sent_cond_z_embed, gbow), 1)
             sent_dec_state = sent_dec_state.unsqueeze(0)
-            tile_sent_dec_state = torch.tile(sent_dec_state, (self.config.PHVM_decoder_num_layer, 1, 1))
+            tile_sent_dec_state = torch.tile(sent_dec_state, (self.config.PHVM_decoder_num_layer*2, 1, 1))
             word_idx = torch.zeros((self.batch_size), dtype=torch.int32, device=self.device)
             group_idx = torch.zeros((self.batch_size, self.config.PHVM_maximum_iterations), dtype=torch.int32, device=self.device)
+            word_idx_list = []
             
             sent_dec_h_state = self.sent_dec_h_state_fc(tile_sent_dec_state)
             sent_dec_c_state = self.sent_dec_c_state_fc(tile_sent_dec_state)
@@ -681,14 +727,17 @@ class PHVM(nn.Module):
                 output = F.log_softmax(output, dim=1)
                 
                 word_idx = output.data.max(1)[1]
-                group_idx[:, t] = word_idx
+                #group_idx[:, t] = word_idx
+                word_idx_list.append(word_idx.unsqueeze(1))
                 
                 t += 1
-            
-            sent_idx[:, i, :] = group_idx
+            group_idx = torch.cat(word_idx_list, 1)
+            #sent_idx[:, i, :] = group_idx
+            group_idx_list.append(group_idx)
             sent_state = sent_dec_h_state[-1]
             
             i += 1
+        sent_idx = torch.cat(group_idx_list, 1)
         
         return sent_idx[:, 1:, :]
         
@@ -697,13 +746,17 @@ class PHVM(nn.Module):
         key_val_embed, cate_embed, text_embed = self.input_embedding(key_input, val_input, cate_input, text)
         key_val_encode_output, key_val_encode_embed = self.input_encode(key_val_embed)
         if self.train_flag:
+            self.sent_KL_loss = torch.tensor(0, dtype=torch.float, device=self.device)
+            self.bow_loss = torch.tensor(0, dtype=torch.float, device=self.device)
+            self.group_dec_loss = torch.tensor(0, dtype=torch.float, device=self.device)
+            self.sent_dec_loss = torch.tensor(0, dtype=torch.float, device=self.device)
+            
             _, tgt_embed = self.text_encode(text_embed)
             dec_input, plan_KL_weight = self.input_sample_encode(cate_embed, key_val_encode_embed, tgt_embed)
             self.sent_word_decode_train(dec_input, key_val_encode_output, input_lens, output_lens, groups, glens, group_cnt, target_input, target_output)
             self.loss_computation(plan_KL_weight)
             
             self.global_step += 1
-            self.sent_KL_loss = torch.tensor(0, dtype=torch.float, device=self.device)
             
             return self.train_loss
         else:

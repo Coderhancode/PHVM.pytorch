@@ -147,7 +147,7 @@ class alignCollate(object):
         padded_target_input = []
         padded_target_output = []
         for t_input, t_output in zip(target_input, target_output):
-            np_target_input = np.zeros((max_g_cnt, max_w_cnt), dtype=np.int32)
+            np_target_input = np.ones((max_g_cnt, max_w_cnt), dtype=np.int32)
             np_target_output = np.zeros((max_g_cnt, max_w_cnt), dtype=np.int32)
             i_g_len, i_w_len = t_input.shape
             np_target_input[:i_g_len, :i_w_len] = t_input

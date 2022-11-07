@@ -35,14 +35,14 @@ class Config:
         self.shuffle_buffer_size = 10000
 
         # overall
-        self.epoch = 100
+        self.epoch = 50
         self.num_training_step = 900000
         self.train_batch_size = 32
         self.test_batch_size = 1
         self.steps_per_stat = 10
         
         # train
-        self.lr = 1e-6
+        self.lr = 1e-4
 
     def check_ckpt(self, model_name):
         if not os.path.exists(self.checkpoint_dir + "/" + model_name + "/"):
